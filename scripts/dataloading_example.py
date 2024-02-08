@@ -22,8 +22,9 @@ if __name__ == "__main__":
     # dsec_dir = Path(args.dsec_dir)
     # assert dsec_dir.is_dir()
 
-    dsec_dir = Path('/home/xiaoshan/work/datasets/OFEVSNN_DSEC')
-    dataset_provider = DatasetProvider(dsec_dir, num_bins=10, delta_t_ms=100)
+    flow_dir = Path('/home/xiaoshan/work/datasets/OFEVSNN_DSEC')
+    seg_dir = Path('/home/xiaoshan/work/datasets/ESS_DSEC')
+    dataset_provider = DatasetProvider(flow_dir, seg_dir, num_bins=10, delta_t_ms=100)
     train_dataset = dataset_provider.get_train_dataset()
 
     # batch_size = 1

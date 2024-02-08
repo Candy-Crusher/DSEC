@@ -8,6 +8,8 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 import imageio
+from PIL import Image
+import random
 
 from dataset.representations import VoxelGrid
 from utils.eventslicer import EventSlicer
@@ -35,10 +37,11 @@ class Sequence(Dataset):
     #         ├── events.h5
     #         └── rectify_map.h5
 
-    def __init__(self, seq_path: Path, mode: str='train', delta_t_ms: int=50, num_bins: int=15):
+    def __init__(self, flow_path: Path, seg_path: Path, mode: str='train', delta_t_ms: int=50, num_bins: int=15):
         assert num_bins >= 1
         assert delta_t_ms <= 100, 'adapt this code, if duration is higher than 100 ms'
-        assert seq_path.is_dir()
+        assert flow_path.is_dir()
+        assert seg_path.is_dir()
 
         # NOTE: Adapt this code according to the present mode (e.g. train, val or test).
         self.mode = mode
@@ -62,26 +65,37 @@ class Sequence(Dataset):
         # self.timestamps = np.loadtxt(disp_dir / 'timestamps.txt', dtype='int64')
         
         # load flow timestamps
-        flow_dir = seq_path / 'flow' 
+        flow_dir = flow_path / 'flow' 
+        seg_dir = seg_path / 'semantic'
         assert flow_dir.is_dir()
         self.timestamps = np.loadtxt(flow_dir / 'forward_timestamps.txt', delimiter = ',', dtype='int64')
 
 
-        flow_dir = flow_dir / 'forward'
+        flow_dir_ = flow_dir / 'forward'
         flow_gt_pathstrings = list()
-        for entry in flow_dir.iterdir():
+        for entry in flow_dir_.iterdir():
             assert str(entry.name).endswith('.png')
             flow_gt_pathstrings.append(str(entry))
         flow_gt_pathstrings.sort()
         self.flow_gt_pathstrings = flow_gt_pathstrings
 
+        seg_dir_ = seg_dir / 'left' / '11classes'
+        seg_gt_pathstrings = list()
+        for entry in seg_dir_.iterdir():
+            assert str(entry.name).endswith('.png')
+            seg_gt_pathstrings.append(str(entry))
+        seg_gt_pathstrings.sort()
+        self.seg_gt_pathstrings = seg_gt_pathstrings
+        self.seg_timestamps = np.loadtxt(seg_dir / 'timestamps.txt', dtype='int64')
+
         assert len(self.flow_gt_pathstrings) == self.timestamps.shape[0]
+        assert len(self.seg_gt_pathstrings) == self.seg_timestamps.shape[0]
 
         self.h5f = dict()
         self.rectify_ev_maps = dict()
         self.event_slicers = dict()
 
-        ev_dir = seq_path / 'events'
+        ev_dir = flow_path / 'events'
         for location in self.locations:
             ev_dir_location = ev_dir / location
             ev_data_file = ev_dir_location / 'events.h5'
@@ -133,6 +147,13 @@ class Sequence(Dataset):
         return flow_map, valid_pixels
     
     @staticmethod
+    def get_seg_label(filepath: Path):
+        assert filepath.is_file()
+        label = Image.open(str(filepath))
+        label = np.array(label)
+        return label
+    
+    @staticmethod
     def close_callback(h5f_dict):
         for k, h5f in h5f_dict.items():
             h5f.close()
@@ -150,18 +171,23 @@ class Sequence(Dataset):
         return rectify_map[y, x]
 
     def __getitem__(self, index):
-        ts_start, ts_end = self.timestamps[index]
+        _, ts_end = self.timestamps[index]
+        seg_index = np.argwhere(self.seg_timestamps == ts_end)[0][0]
         # ts_start should be fine (within the window as we removed the first disparity map)
-        # ts_start = ts_end - self.delta_t_us
+        ts_start = ts_end - self.delta_t_us
 
+        output = {}
         flow_gt_path = Path(self.flow_gt_pathstrings[index])
         file_index = int(flow_gt_path.stem)
         flow_maps, valid_pixels = self.get_flow_map(flow_gt_path)
-        output = {
-            'flow_gt': flow_maps,
-            'flow_mask': valid_pixels,
-            'file_index': file_index,
-        }
+        # remove 40 bottom rows
+        flow_maps = torch.from_numpy(flow_maps[:, :-40, :])     # 2 H W
+        valid_pixels = torch.from_numpy(valid_pixels[:-40, :])  #   H W
+
+        seg_path = Path(self.seg_gt_pathstrings[seg_index])
+        seg_label = self.get_seg_label(seg_path)
+        seg_label = torch.from_numpy(seg_label).long()          #   H W
+
         for location in self.locations:
             event_data = self.event_slicers[location].get_events(ts_start, ts_end)
 
@@ -175,41 +201,31 @@ class Sequence(Dataset):
             y_rect = xy_rect[:, 1]
 
             event_representation = self.events_to_voxel_grid(x_rect, y_rect, p, t)
+
+             # remove 40 bottom rows
+            event_representation = event_representation[:, :-40, :] # T=10 H W
+
             if 'representation' not in output:
                 output['representation'] = dict()
             output['representation'][location] = event_representation
+        
+        # if self.augmentation:
+        #     value_flip = round(random.random())
+        #     if value_flip > 0.5:
+        #         event_tensor = torch.flip(event_tensor, [2])    # C=T H W
+        #         seg_label = torch.flip(seg_label, [1])          #     H W
+        #         flow_maps = torch.flip(flow_maps, [2])          # C=2 H W
+        #         valid_pixels = torch.flip(valid_pixels, [1])    #     H W
+
+        output['seg_gt'] = seg_label
+        output['flow_gt'] = flow_maps
+        output['flow_mask'] = valid_pixels
+        output['file_index'] = file_index
+        
         return output
     
     def save_data(self, root, sequence):
         for index in tqdm(range(len(self))):
-            ts_start, ts_end = self.timestamps[index]
-            # ts_start should be fine (within the window as we removed the first disparity map)
-            # ts_start = ts_end - self.delta_t_us
-
-            flow_gt_path = Path(self.flow_gt_pathstrings[index])
-            file_index = int(flow_gt_path.stem)
-            flow_maps, valid_pixels = self.get_flow_map(flow_gt_path)
-            output = {
-                'flow_gt': flow_maps,
-                'flow_mask': valid_pixels,
-                'file_index': file_index,
-            }
-            for location in self.locations:
-                event_data = self.event_slicers[location].get_events(ts_start, ts_end)
-
-                p = event_data['p']
-                t = event_data['t']
-                x = event_data['x']
-                y = event_data['y']
-
-                xy_rect = self.rectify_events(x, y, location)
-                x_rect = xy_rect[:, 0]
-                y_rect = xy_rect[:, 1]
-
-                event_representation = self.events_to_voxel_grid(x_rect, y_rect, p, t)
-                if 'representation' not in output:
-                    output['representation'] = dict()
-                output['representation'][location] = event_representation
+            output = self.__getitem__(index)
             filename = '{}_{}.npy'.format(sequence, str(index+1).zfill(4))
             np.save(os.path.join(root, filename), output)
-        return output
