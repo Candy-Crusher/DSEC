@@ -59,7 +59,6 @@ class EventSlicer:
         # We assume that the times are top-off-day, hence subtract offset:
         t_start_us -= self.t_offset
         t_end_us -= self.t_offset
-
         t_start_ms, t_end_ms = self.get_conservative_window_ms(t_start_us, t_end_us)
         t_start_ms_idx = self.ms2idx(t_start_ms)
         t_end_ms_idx = self.ms2idx(t_end_ms)
