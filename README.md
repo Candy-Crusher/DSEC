@@ -1,3 +1,6 @@
+This dataset processing code is adapted from https://github.com/uzh-rpg/DSEC, thanks for their amazing work.
+Since the segmentation and flow datasets processing code remain a blank, here we complete it.
+In the future, we may integrate the DSEC datasetprocessing for multiple gt to promote multi-task learning on DSEC.
 # News
 
 - **Nov. 26, 2022** - Lidar and IMU data is now available on the [download page](https://dsec.ifi.uzh.ch/dsec-datasets/download/).
