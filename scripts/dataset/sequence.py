@@ -10,12 +10,15 @@ from torch.utils.data import Dataset
 import imageio
 from PIL import Image
 import random
+import yaml
 
 from dataset.representations import VoxelGrid
 from utils.eventslicer import EventSlicer
 
 import ipdb
 from tqdm import tqdm
+
+from dataset.visualization import *
 
 class Sequence(Dataset):
     # NOTE: This is just an EXAMPLE class for convenience. Adapt it to your case.
@@ -58,7 +61,7 @@ class Sequence(Dataset):
 
         # Save delta timestamp in ms
         self.delta_t_us = delta_t_ms * 1000
-
+        remove_time_window=250
         # # load disparity timestamps
         # disp_dir = seq_path / 'disparity'
         # assert disp_dir.is_dir()
@@ -79,20 +82,57 @@ class Sequence(Dataset):
             self.flow_gt_pathstrings = flow_gt_pathstrings
             
             assert len(self.flow_gt_pathstrings) == self.timestamps.shape[0]
-        seg_dir = seg_path / 'semantic'
-        seg_dir_ = seg_dir / 'left' / '11classes'
-        seg_gt_pathstrings = list()
-        for entry in seg_dir_.iterdir():
-            assert str(entry.name).endswith('.png')
-            seg_gt_pathstrings.append(str(entry))
-        seg_gt_pathstrings.sort()
-        self.seg_gt_pathstrings = seg_gt_pathstrings
-        self.seg_timestamps = np.loadtxt(seg_dir / 'timestamps.txt', dtype='int64')
-        remove_time_window=250
-        self.seg_timestamps = self.seg_timestamps[(remove_time_window // 100 + 1) * 2:]
-        del self.seg_gt_pathstrings[:(remove_time_window // 100 + 1) * 2]
 
-        assert len(self.seg_gt_pathstrings) == self.seg_timestamps.shape[0]
+        # segmentation gt
+        # load segmentation timestamps
+        if self.mode == 'train' or self.mode=='seg_val':
+            seg_dir = seg_path / 'semantic'
+            assert seg_dir.is_dir()
+            self.seg_timestamps = np.loadtxt(seg_dir / 'timestamps.txt', dtype='int64')
+
+            # load segmentation paths
+            ev_seg_dir = seg_dir / 'left' / '11classes'
+            assert ev_seg_dir.is_dir()
+            seg_gt_pathstrings = list()
+            for entry in ev_seg_dir.iterdir():
+                assert str(entry.name).endswith('.png')
+                seg_gt_pathstrings.append(str(entry))
+            seg_gt_pathstrings.sort()
+            self.seg_gt_pathstrings = seg_gt_pathstrings
+
+            self.seg_timestamps = self.seg_timestamps[(remove_time_window // 100 + 1) * 2:]
+            del self.seg_gt_pathstrings[:(remove_time_window // 100 + 1) * 2]
+            assert len(self.seg_gt_pathstrings) == self.seg_timestamps.shape[0]
+
+        if self.mode == 'train' or self.mode=='depth_val':
+            # cam gt
+            cam_yaml = seg_path / 'calibration' / 'cam_to_cam.yaml'
+            with open(cam_yaml,"r") as file:
+                parameter=yaml.load(file.read(),Loader=yaml.Loader)
+                mtx=parameter['disparity_to_depth']['cams_03']
+                self.disp2depth_mtx=np.array(mtx)
+            # disparity gt
+            # load disparity timestamps
+            disp_dir = seg_path / 'disparity'
+            assert disp_dir.is_dir()
+            self.disp_timestamps = np.loadtxt(disp_dir / 'timestamps.txt', dtype='int64')
+
+            # load disparity paths
+            ev_disp_dir = disp_dir / 'event'
+            assert ev_disp_dir.is_dir()
+            disp_gt_pathstrings = list()
+            for entry in ev_disp_dir.iterdir():
+                assert str(entry.name).endswith('.png')
+                disp_gt_pathstrings.append(str(entry))
+            disp_gt_pathstrings.sort()
+            self.disp_gt_pathstrings = disp_gt_pathstrings
+
+            self.disp_timestamps = self.disp_timestamps[(remove_time_window // 100 + 1):]
+            del self.disp_gt_pathstrings[:(remove_time_window // 100 + 1)]
+            assert len(self.disp_gt_pathstrings) == self.disp_timestamps.size
+        
+        if self.mode == 'train':
+            assert (self.seg_timestamps.size + 1) // 2 == self.disp_timestamps.size
 
         self.h5f = dict()
         self.rectify_ev_maps = dict()
@@ -163,7 +203,10 @@ class Sequence(Dataset):
 
     def __len__(self):
         # return len(self.seg_gt_pathstrings)
-        return (self.seg_timestamps.shape[0] + 1) // 2
+        if self.mode == 'train' or self.mode=='seg_val':
+            return (self.seg_timestamps.size + 1) // 2
+        elif self.mode=='depth_val':
+            return (self.disp_timestamps.size)
 
     def rectify_events(self, x: np.ndarray, y: np.ndarray, location: str):
         assert location in self.locations
@@ -193,15 +236,35 @@ class Sequence(Dataset):
 
         # seg_path = Path(self.seg_gt_pathstrings[seg_index])
         # seg_label = self.get_seg_label(seg_path)
-        # seg_label = torch.from_numpy(seg_label).long()          #   H 
-        
-        seg_path = Path(self.seg_gt_pathstrings[index * 2])
-        seg_label = self.get_seg_label(seg_path)
-        seg_label = torch.from_numpy(seg_label).long()          #   H W
-
-        ts_end = self.seg_timestamps[index * 2]
+        # seg_label = torch.from_numpy(seg_label).long()          #   H
+        if self.mode == 'train':
+            assert self.seg_timestamps[index * 2] == self.disp_timestamps[index]
+        if self.mode == 'seg_val':
+            ts_end = self.seg_timestamps[index * 2]
+        if self.mode == 'depth_val':
+            ts_end = self.disp_timestamps[index]
         ts_start = ts_end - self.delta_t_us
-        output = {}
+
+        output = dict()
+
+        if self.mode == 'train' or self.mode == 'seg_val':
+            seg_path = Path(self.seg_gt_pathstrings[index * 2])
+            seg_label = self.get_seg_label(seg_path)
+            seg_label = torch.from_numpy(seg_label).long()          #   H W
+            output['seg_gt'] = seg_label                            #   H W torch.int64
+
+        if self.mode == 'train' or self.mode == 'depth_val':
+            disp_path = Path(self.disp_gt_pathstrings[index])
+            file_index = int(disp_path.stem)
+            disp_gt = self.get_disparity_map(disp_path)
+
+            _3dImage = cv2.reprojectImageTo3D(disp_gt, self.disp2depth_mtx)
+            depth_gt = _3dImage[:, :, 2]                            #  H W 3 → H W
+
+            output['disp_gt'] = torch.from_numpy(disp_gt)           #   H W torch.unit8
+            output['depth_gt'] = torch.from_numpy(depth_gt)         #   H W torch.float32
+            output['file_index'] = file_index
+
         for location in self.locations:
             event_data = self.event_slicers[location].get_events(ts_start, ts_end)
 
@@ -216,32 +279,54 @@ class Sequence(Dataset):
 
             event_representation = self.events_to_voxel_grid(x_rect, y_rect, p, t)
 
-             # remove 40 bottom rows
-            event_representation = event_representation[:, :-40, :] # T=10 H W
+            # # remove 40 bottom rows
+            # event_representation = event_representation[:, :-40, :] # T=10 H W
 
-            # if self.augmentation:
-            #     value_flip = round(random.random())
-            #     if value_flip > 0.5:
-            #         event_representation = torch.flip(event_representation, [2])
-            #         seg_label = torch.flip(seg_label, [1])
             if 'representation' not in output:
                 output['representation'] = dict()
-            output['representation'][location] = event_representation
-        
-        # if self.augmentation:
-        #     value_flip = round(random.random())
-        #     if value_flip > 0.5:
-        #         event_tensor = torch.flip(event_tensor, [2])    # C=T H W
-        #         seg_label = torch.flip(seg_label, [1])          #     H W
-        #         flow_maps = torch.flip(flow_maps, [2])          # C=2 H W
-        #         valid_pixels = torch.flip(valid_pixels, [1])    #     H W
+            output['representation'][location] = event_representation   # T=10 H W torch.float32
 
-        output['seg_gt'] = seg_label
-        
+        # # visualization
+        # overlay = True
+        # disp_img = disp_img_to_rgb_img(output['disp_gt'])       # H W 3 unit8
+        # depth_img = output['depth_gt'].numpy()                  # H W unit8
+        # seg_img = output['seg_gt'].numpy()                      # H W float32
+        # ev_img = torch.sum(output['representation']['left'], axis=0).numpy()
+        # ev_img = (ev_img/ev_img.max()*256).astype('uint8')      # H W int64
+
+        # # disp_ev_overlay_img = get_disp_overlay(ev_img, disp_img, height=480, width=640)
+        # # ev_rbg_img, depth_rgb_image, depth_ev_overlay_img = get_depth_overlay(ev_img, depth_img, height=480, width=640)
+        # # ev_rbg_img, seg_rgb_image, seg_ev_overlay_img = get_seg_overlay(ev_img, depth_img, height=480, width=640)
+        # depth_rgb_image, seg_rgb_image, overlay = get_depth_seg_overlay(depth_img, seg_img, height=480, width=640)
+
+
+        # path = '/home/xiaoshan/work/datasets/ESS_DSEC/train/seg_depth_dataset/overlay/'
+        # idx = str(index+1).zfill(4)
+
+        # ev_path = path + 'ev_{}.png'.format(idx)
+        # disp_path = path + 'disp_{}.png'.format(idx)
+        # depth_path = path + 'depth_{}.png'.format(idx)
+        # seg_path = path + 'seg_{}.png'.format(idx)
+
+        # disp_ev_overlay_path = path + 'disp_ev_overlay_{}.png'.format(idx)
+        # depth_ev_overlay_path = path + 'depth_ev_overlay_{}.png'.format(idx)
+        # seg_ev_overlay_path = path + 'seg_ev_overlay_{}.png'.format(idx)
+        # seg_depth_overlay_path = path + 'seg_depth_overlay_{}.png'.format(idx)
+
+        # # cv2.imwrite(disp_path, disp_img)
+        # # cv2.imwrite(ev_path, ev_img)
+        # # cv2.imwrite(depth_path, depth_img)
+        # # cv2.imwrite(seg_path, seg_img)
+
+        # # cv2.imwrite(disp_ev_overlay_path, disp_ev_overlay_img)
+        # cv2.imwrite(depth_path, depth_rgb_image)
+        # cv2.imwrite(seg_path, seg_rgb_image)
+        # cv2.imwrite(seg_depth_overlay_path, overlay)
+        # exit(0)
         return output
     
     def save_data(self, root, sequence):
         for index in tqdm(range(len(self))):
             output = self.__getitem__(index)
             filename = '{}_{}.npy'.format(sequence, str(index+1).zfill(4))
-            np.save(os.path.join(root, 'seg_dataset_large', filename), output)
+            np.save(os.path.join(root, 'depth_dataset_z10az11a', filename), output)

@@ -31,6 +31,28 @@ def get_disp_overlay(image_1c, disp_rgb_image, height, width):
     overlay = cv2.addWeighted(image, 0.1, disp_rgb_image, 0.9, 0)
     return overlay
 
+def get_depth_overlay(image_1c, depth_1c_image, height, width):
+    image = np.repeat(image_1c[..., np.newaxis], 3, axis=2)
+    depth_rgb_image = np.repeat(depth_1c_image[..., np.newaxis], 3, axis=2)
+    # depth_rgb_image = cv2.applyColorMap((depth_1c_image * 255).astype(np.uint8), cv2.COLORMAP_JET)
+    overlay = cv2.addWeighted(image, 0.5, depth_rgb_image, 0.5, 0, dtype=cv2.CV_8UC3)
+    return image, depth_rgb_image, overlay
+
+def get_seg_overlay(image_1c, seg_1c_image, height, width):
+    image = np.repeat(image_1c[..., np.newaxis], 3, axis=2)
+    seg_rgb_image = np.repeat(seg_1c_image[..., np.newaxis], 3, axis=2)
+    # seg_rgb_image = cv2.applyColorMap((seg_1c_image * 255).astype(np.uint8), cv2.COLORMAP_JET)
+    overlay = cv2.addWeighted(image, 0.5, seg_rgb_image, 0.5, 0, dtype=cv2.CV_8UC3)
+    return image, seg_rgb_image, overlay
+
+def get_depth_seg_overlay(depth_1c_image, seg_1c_image, height, width):
+    depth_rgb_image = np.repeat(depth_1c_image[..., np.newaxis], 3, axis=2)[:-40, :, :]
+    seg_rgb_image = np.repeat(seg_1c_image[..., np.newaxis], 3, axis=2)
+    # depth_rgb_image = cv2.applyColorMap((depth_1c_image * 255).astype(np.uint8), cv2.COLORMAP_JET)
+    # seg_rgb_image = cv2.applyColorMap((seg_1c_image * 255).astype(np.uint8), cv2.COLORMAP_JET)
+    overlay = cv2.addWeighted(seg_rgb_image, 0.5, depth_rgb_image, 0.5, 0, dtype=cv2.CV_8UC3)
+    return depth_rgb_image, seg_rgb_image, overlay
+
 def show_disp_overlay(image_1c, disp_rgb_image, height, width):
     overlay = get_disp_overlay(image_1c, disp_rgb_image, height, width)
     show_image(overlay)
